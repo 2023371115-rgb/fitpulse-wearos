@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import '../widgets/stats_widget.dart';
 import '../widgets/round_watch_layout.dart';
 
-const String _kBackendBase = 'http://10.0.2.2:3000';
+const String _kBackendBase = String.fromEnvironment(
+  'FITPULSE_API_URL',
+  defaultValue: 'https://fitpulse-backend-r77o.onrender.com',
+);
 
 class _Metric {
   final int? heartRate;
@@ -39,9 +43,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   String? _deviceId;
   _Metric? _latestMetric;
   bool _loading = false;
+  bool _sending = false;
   String? _error;
   bool _demoMode = false;
+  String _status = 'Listo para sincronizar';
   Timer? _pollTimer;
+  final Random _random = Random();
 
   @override
   void initState() {
@@ -70,11 +77,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (res.statusCode == 200) {
         final List<dynamic> data = jsonDecode(res.body) as List<dynamic>;
         if (data.isNotEmpty) {
-          _deviceId = data.first['id'] as String;
+          final wearable = data.cast<Map<String, dynamic>?>().firstWhere(
+            (item) => item?['type'] == 'wearable',
+            orElse: () => data.first as Map<String, dynamic>,
+          );
+          _deviceId = wearable?['id'] as String?;
           await _loadMetric();
           _startPolling();
         } else {
-          _useDemoMetrics();
+          await _registerWearable();
+          await _sendMetric(kind: 'conexion');
         }
       } else {
         setState(() => _error = 'Error ${res.statusCode}');
@@ -93,6 +105,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     setState(() {
       _error = null;
       _demoMode = true;
+      _status = 'Demo local sin token';
       _latestMetric = _Metric(
         heartRate: 72,
         steps: 5284,
@@ -101,6 +114,92 @@ class _DashboardScreenState extends State<DashboardScreen> {
         recordedAt: DateTime.now(),
       );
     });
+  }
+
+  Future<void> _registerWearable() async {
+    final res = await http.post(
+      Uri.parse('$_kBackendBase/api/devices'),
+      headers: {
+        'Authorization': 'Bearer ${widget.token}',
+        'Content-Type': 'application/json',
+      },
+      body: jsonEncode({
+        'name': 'FitPulse Wear OS',
+        'type': 'wearable',
+      }),
+    );
+
+    if (res.statusCode == 201) {
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      _deviceId = data['id'] as String?;
+      setState(() => _status = 'Wearable registrado');
+    } else {
+      throw Exception('No se pudo registrar wearable: ${res.statusCode}');
+    }
+  }
+
+  Future<void> _sendMetric({required String kind}) async {
+    final now = DateTime.now();
+    final currentSteps = _latestMetric?.steps ?? 1200;
+    final metric = _Metric(
+      heartRate: kind == 'pasos' ? (_latestMetric?.heartRate ?? 72) : 68 + _random.nextInt(34),
+      steps: kind == 'pulso' ? currentSteps : currentSteps + 200 + _random.nextInt(900),
+      spo2: 96 + _random.nextInt(4),
+      temperature: 36.1 + (_random.nextInt(8) / 10),
+      recordedAt: now,
+    );
+
+    if (widget.token.trim().isEmpty || _deviceId == null) {
+      setState(() {
+        _demoMode = true;
+        _latestMetric = metric;
+        _status = kind == 'pulso' ? 'Pulso demo generado' : 'Pasos demo generados';
+      });
+      return;
+    }
+
+    setState(() {
+      _sending = true;
+      _status = 'Enviando ${kind == 'pulso' ? 'pulso' : 'pasos'}...';
+    });
+
+    try {
+      final res = await http.post(
+        Uri.parse('$_kBackendBase/api/devices/$_deviceId/metrics/user'),
+        headers: {
+          'Authorization': 'Bearer ${widget.token}',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'heart_rate': metric.heartRate,
+          'steps': metric.steps,
+          'spo2': metric.spo2,
+          'temperature': metric.temperature,
+          'extra': {
+            'source': 'wear_os_demo',
+            'kind': kind,
+          },
+        }),
+      );
+
+      if (res.statusCode == 201) {
+        setState(() {
+          _demoMode = false;
+          _latestMetric = metric;
+          _status = kind == 'pulso' ? 'Pulso enviado a FitPulse' : 'Pasos enviados a FitPulse';
+        });
+      } else {
+        throw Exception('HTTP ${res.statusCode}');
+      }
+    } catch (e) {
+      setState(() {
+        _demoMode = true;
+        _latestMetric = metric;
+        _status = 'Demo local: backend no disponible';
+      });
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
   }
 
   Future<void> _loadMetric() async {
@@ -179,6 +278,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                       const SizedBox(height: 8),
                     ],
+                    Center(
+                      child: Text(
+                        _status,
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(fontSize: 9, color: Colors.white54, fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
 
                     // Lista de métricas en formato compacto para reloj
                     if (_latestMetric != null) ...[
@@ -196,6 +303,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                     
                     const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: _sending ? null : () => _sendMetric(kind: 'pulso'),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFFEF4444),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              textStyle: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+                            ),
+                            child: const Text('Pulso'),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: _sending ? null : () => _sendMetric(kind: 'pasos'),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF0F9D58),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              textStyle: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+                            ),
+                            child: const Text('Pasos'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
                     
                     // Botón de salir discreto al final del scroll para no estorbar
                     Center(
