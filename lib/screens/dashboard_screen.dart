@@ -456,13 +456,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (_latestMetric == null) return [];
     return [
       if (_latestMetric!.heartRate != null)
-        StatItem(title: 'Frecuencia', value: '${_latestMetric!.heartRate} bpm', progress: ((_latestMetric!.heartRate ?? 0) / 200).clamp(0.0, 1.0).toDouble()),
+        StatItem.heart('${_latestMetric!.heartRate} bpm', ((_latestMetric!.heartRate ?? 0) / 200).clamp(0.0, 1.0).toDouble()),
       if (_latestMetric!.spo2 != null)
-        StatItem(title: 'SpO2', value: '${_latestMetric!.spo2}%', progress: ((_latestMetric!.spo2 ?? 0) / 100).clamp(0.0, 1.0).toDouble()),
+        StatItem.oxygen('${_latestMetric!.spo2}%', ((_latestMetric!.spo2 ?? 0) / 100).clamp(0.0, 1.0).toDouble()),
       if (_latestMetric!.steps != null)
-        StatItem(title: 'Pasos', value: '${_latestMetric!.steps}', progress: ((_latestMetric!.steps ?? 0) / 10000).clamp(0.0, 1.0).toDouble()),
+        StatItem.steps('${_latestMetric!.steps}', ((_latestMetric!.steps ?? 0) / 10000).clamp(0.0, 1.0).toDouble()),
       if (_latestMetric!.temperature != null)
-        StatItem(title: 'Temp.', value: '${_latestMetric!.temperature} C', progress: (((_latestMetric!.temperature ?? 36) - 35) / 5).clamp(0.0, 1.0).toDouble()),
+        StatItem.temperature('${_latestMetric!.temperature} C', (((_latestMetric!.temperature ?? 36) - 35) / 5).clamp(0.0, 1.0).toDouble()),
     ];
   }
 
