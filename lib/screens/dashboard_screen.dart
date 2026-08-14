@@ -60,6 +60,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _demoMode = false;
   String _status = 'Listo para sincronizar';
   Timer? _pollTimer;
+  Timer? _autoSendTimer;
   final Random _random = Random();
 
   @override
@@ -72,6 +73,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void dispose() {
     _pairCodeController.dispose();
     _pollTimer?.cancel();
+    _autoSendTimer?.cancel();
     super.dispose();
   }
 
@@ -80,7 +82,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
     try {
       await _loadPairedDevice();
       if (_deviceId != null && _deviceToken != null) {
-        _useDemoMetrics(status: 'Reloj enlazado');
+        _useDemoMetrics(status: 'Sensores simulados');
+        await _sendMetric(kind: 'auto');
+        _startAutoSync();
         return;
       }
 
@@ -139,6 +143,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _clearPairedDevice() async {
+    _autoSendTimer?.cancel();
     await _storage.delete(key: _deviceIdKey);
     await _storage.delete(key: _deviceTokenKey);
     await _storage.delete(key: _deviceNameKey);
@@ -200,7 +205,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _demoMode = false;
         _status = 'Reloj enlazado';
       });
-      await _sendMetric(kind: 'conexion');
+      await _sendMetric(kind: 'auto');
+      _startAutoSync();
     } catch (_) {
       setState(() => _status = 'Codigo vencido o incorrecto');
     } finally {
@@ -231,11 +237,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _sendMetric({required String kind}) async {
+    if (_sending && kind == 'auto') return;
     final now = DateTime.now();
     final currentSteps = _latestMetric?.steps ?? 1200;
     final metric = _Metric(
       heartRate: kind == 'pasos' ? (_latestMetric?.heartRate ?? 72) : 68 + _random.nextInt(34),
-      steps: kind == 'pulso' ? currentSteps : currentSteps + 200 + _random.nextInt(900),
+      steps: kind == 'pulso' ? currentSteps : currentSteps + 60 + _random.nextInt(180),
       spo2: 96 + _random.nextInt(4),
       temperature: 36.1 + (_random.nextInt(8) / 10),
       recordedAt: now,
@@ -270,7 +277,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           setState(() {
             _demoMode = false;
             _latestMetric = metric;
-            _status = kind == 'pulso' ? 'Pulso enviado' : 'Pasos enviados';
+            _status = kind == 'auto'
+                ? 'Sincronizando cada 5s'
+                : kind == 'pulso'
+                    ? 'Pulso enviado'
+                    : 'Pasos enviados';
           });
         } else {
           throw Exception('HTTP ${res.statusCode}');
@@ -320,13 +331,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
         }),
       );
 
-      if (res.statusCode == 201) {
-        setState(() {
-          _demoMode = false;
-          _latestMetric = metric;
-          _status = kind == 'pulso' ? 'Pulso enviado a FitPulse' : 'Pasos enviados a FitPulse';
-        });
-      } else {
+        if (res.statusCode == 201) {
+          setState(() {
+            _demoMode = false;
+            _latestMetric = metric;
+            _status = kind == 'auto'
+                ? 'Sincronizando cada 5s'
+                : kind == 'pulso'
+                    ? 'Pulso enviado a FitPulse'
+                    : 'Pasos enviados a FitPulse';
+          });
+        } else {
         throw Exception('HTTP ${res.statusCode}');
       }
     } catch (e) {
@@ -422,6 +437,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _startPolling() {
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) => _loadMetric());
+  }
+
+  void _startAutoSync() {
+    _autoSendTimer?.cancel();
+    if (_deviceId == null || _deviceToken == null) return;
+    _autoSendTimer = Timer.periodic(const Duration(seconds: 5), (_) => _sendMetric(kind: 'auto'));
   }
 
   List<StatItem> get _statItems {
