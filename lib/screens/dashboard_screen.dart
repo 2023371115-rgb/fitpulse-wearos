@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:http/http.dart' as http;
 import '../widgets/stats_widget.dart';
 import '../widgets/round_watch_layout.dart';
@@ -40,10 +41,21 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  static const _storage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+  );
+  static const _deviceIdKey = 'fitpulse_device_id';
+  static const _deviceTokenKey = 'fitpulse_device_token';
+  static const _deviceNameKey = 'fitpulse_device_name';
+
+  final TextEditingController _pairCodeController = TextEditingController();
   String? _deviceId;
+  String? _deviceToken;
+  String? _deviceName;
   _Metric? _latestMetric;
   bool _loading = false;
   bool _sending = false;
+  bool _pairing = false;
   String? _error;
   bool _demoMode = false;
   String _status = 'Listo para sincronizar';
@@ -58,6 +70,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
   @override
   void dispose() {
+    _pairCodeController.dispose();
     _pollTimer?.cancel();
     super.dispose();
   }
@@ -65,8 +78,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _initDashboard() async {
     setState(() { _loading = true; _error = null; _demoMode = false; });
     try {
+      await _loadPairedDevice();
+      if (_deviceId != null && _deviceToken != null) {
+        _useDemoMetrics(status: 'Reloj enlazado');
+        return;
+      }
+
       if (widget.token.trim().isEmpty) {
-        _useDemoMetrics();
+        _useDemoMetrics(status: 'Enlaza con codigo web');
         return;
       }
       // Simplificado: Obtenemos el primer dispositivo directamente sin dropdowns
@@ -94,18 +113,49 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } catch (e) {
       // ignore: avoid_print
       print('FITPULSE_ERROR: $e');
-      _useDemoMetrics();
+      _useDemoMetrics(status: 'Demo local sin conexion');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  void _useDemoMetrics() {
+  Future<void> _loadPairedDevice() async {
+    _deviceId = await _storage.read(key: _deviceIdKey);
+    _deviceToken = await _storage.read(key: _deviceTokenKey);
+    _deviceName = await _storage.read(key: _deviceNameKey);
+  }
+
+  Future<void> _savePairedDevice({
+    required String deviceId,
+    required String deviceToken,
+    required String deviceName,
+  }) async {
+    await _storage.write(key: _deviceIdKey, value: deviceId);
+    await _storage.write(key: _deviceTokenKey, value: deviceToken);
+    await _storage.write(key: _deviceNameKey, value: deviceName);
+    _deviceId = deviceId;
+    _deviceToken = deviceToken;
+    _deviceName = deviceName;
+  }
+
+  Future<void> _clearPairedDevice() async {
+    await _storage.delete(key: _deviceIdKey);
+    await _storage.delete(key: _deviceTokenKey);
+    await _storage.delete(key: _deviceNameKey);
+    setState(() {
+      _deviceId = null;
+      _deviceToken = null;
+      _deviceName = null;
+      _status = 'Enlaza con codigo web';
+    });
+  }
+
+  void _useDemoMetrics({String status = 'Demo local'}) {
     if (!mounted) return;
     setState(() {
       _error = null;
       _demoMode = true;
-      _status = 'Demo local sin token';
+      _status = status;
       _latestMetric = _Metric(
         heartRate: 72,
         steps: 5284,
@@ -114,6 +164,48 @@ class _DashboardScreenState extends State<DashboardScreen> {
         recordedAt: DateTime.now(),
       );
     });
+  }
+
+  Future<void> _pairWithCode() async {
+    final code = _pairCodeController.text.trim();
+    if (!RegExp(r'^\d{6}$').hasMatch(code)) {
+      setState(() => _status = 'Codigo de 6 digitos');
+      return;
+    }
+
+    setState(() {
+      _pairing = true;
+      _status = 'Enlazando reloj...';
+    });
+
+    try {
+      final res = await http.post(
+        Uri.parse('$_kBackendBase/api/devices/pair'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'code': code}),
+      );
+
+      if (res.statusCode != 200) {
+        throw Exception('HTTP ${res.statusCode}');
+      }
+
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      await _savePairedDevice(
+        deviceId: data['deviceId'] as String,
+        deviceToken: data['deviceToken'] as String,
+        deviceName: data['name'] as String? ?? 'FitPulse Wear OS',
+      );
+      _pairCodeController.clear();
+      setState(() {
+        _demoMode = false;
+        _status = 'Reloj enlazado';
+      });
+      await _sendMetric(kind: 'conexion');
+    } catch (_) {
+      setState(() => _status = 'Codigo vencido o incorrecto');
+    } finally {
+      if (mounted) setState(() => _pairing = false);
+    }
   }
 
   Future<void> _registerWearable() async {
@@ -148,6 +240,52 @@ class _DashboardScreenState extends State<DashboardScreen> {
       temperature: 36.1 + (_random.nextInt(8) / 10),
       recordedAt: now,
     );
+
+    if (_deviceId != null && _deviceToken != null) {
+      setState(() {
+        _sending = true;
+        _status = 'Enviando ${kind == 'pulso' ? 'pulso' : 'pasos'}...';
+      });
+
+      try {
+        final res = await http.post(
+          Uri.parse('$_kBackendBase/api/devices/$_deviceId/metrics'),
+          headers: {
+            'Authorization': 'Bearer $_deviceToken',
+            'Content-Type': 'application/json',
+          },
+          body: jsonEncode({
+            'heart_rate': metric.heartRate,
+            'steps': metric.steps,
+            'spo2': metric.spo2,
+            'temperature': metric.temperature,
+            'extra': {
+              'source': 'wear_os_pair_code',
+              'kind': kind,
+            },
+          }),
+        );
+
+        if (res.statusCode == 201) {
+          setState(() {
+            _demoMode = false;
+            _latestMetric = metric;
+            _status = kind == 'pulso' ? 'Pulso enviado' : 'Pasos enviados';
+          });
+        } else {
+          throw Exception('HTTP ${res.statusCode}');
+        }
+      } catch (_) {
+        setState(() {
+          _demoMode = true;
+          _latestMetric = metric;
+          _status = 'Demo local: sin backend';
+        });
+      } finally {
+        if (mounted) setState(() => _sending = false);
+      }
+      return;
+    }
 
     if (widget.token.trim().isEmpty || _deviceId == null) {
       setState(() {
@@ -200,6 +338,71 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  Widget _buildPairingCard() {
+    final paired = _deviceId != null && _deviceToken != null;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF172033),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF0F9D58).withValues(alpha: .4)),
+      ),
+      child: paired
+          ? Column(
+              children: [
+                const Icon(Icons.watch, color: Color(0xFF0F9D58), size: 18),
+                const SizedBox(height: 4),
+                Text(
+                  _deviceName ?? 'Wear OS enlazado',
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w800),
+                ),
+                TextButton(
+                  onPressed: _clearPairedDevice,
+                  child: const Text('Cambiar', style: TextStyle(fontSize: 10)),
+                ),
+              ],
+            )
+          : Column(
+              children: [
+                const Text(
+                  'Codigo web',
+                  style: TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: _pairCodeController,
+                  keyboardType: TextInputType.number,
+                  maxLength: 6,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white, fontSize: 18, letterSpacing: 4, fontWeight: FontWeight.w900),
+                  decoration: InputDecoration(
+                    counterText: '',
+                    isDense: true,
+                    filled: true,
+                    fillColor: const Color(0xFF0F172A),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                ),
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: _pairing ? null : _pairWithCode,
+                    style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFF0F9D58),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      textStyle: const TextStyle(fontSize: 10, fontWeight: FontWeight.w800),
+                    ),
+                    child: Text(_pairing ? 'Enlazando...' : 'Enlazar'),
+                  ),
+                ),
+              ],
+            ),
+    );
   }
 
   Future<void> _loadMetric() async {
@@ -286,22 +489,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                       ),
                     ),
                     const SizedBox(height: 8),
-
-                    // Lista de métricas en formato compacto para reloj
-                    if (_latestMetric != null) ...[
-                      StatsWidget(items: _statItems),
-                      const SizedBox(height: 6),
-                      Center(
-                        child: Text(
-                          'Act: ${_latestMetric!.recordedAt.toLocal().toString().substring(11, 16)}',
-                          style: const TextStyle(fontSize: 9, color: Colors.white38),
-                        ),
-                      ),
-                    ] else
-                      const Center(
-                        child: Text('Sin datos', style: TextStyle(color: Colors.white30, fontSize: 11))
-                      ),
-                    
+                    _buildPairingCard(),
                     const SizedBox(height: 8),
                     Row(
                       children: [
@@ -332,7 +520,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: 8),
+
+                    // Lista de métricas en formato compacto para reloj
+                    if (_latestMetric != null) ...[
+                      StatsWidget(items: _statItems),
+                      const SizedBox(height: 6),
+                      Center(
+                        child: Text(
+                          'Act: ${_latestMetric!.recordedAt.toLocal().toString().substring(11, 16)}',
+                          style: const TextStyle(fontSize: 9, color: Colors.white38),
+                        ),
+                      ),
+                    ] else
+                      const Center(
+                        child: Text('Sin datos', style: TextStyle(color: Colors.white30, fontSize: 11))
+                      ),
                     
                     // Botón de salir discreto al final del scroll para no estorbar
                     Center(

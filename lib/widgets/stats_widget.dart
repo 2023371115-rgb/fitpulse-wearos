@@ -14,7 +14,9 @@ class StatsWidget extends StatelessWidget {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final cardWidth = constraints.maxWidth.clamp(120.0, 180.0).toDouble();
+        final cardWidth = constraints.maxWidth < 260
+            ? ((constraints.maxWidth - 6) / 2).clamp(92.0, 130.0).toDouble()
+            : constraints.maxWidth.clamp(120.0, 180.0).toDouble();
 
         return Wrap(
           alignment: WrapAlignment.center,
@@ -40,11 +42,13 @@ class StatsWidget extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(it.title,
-                  style: const TextStyle(fontSize: 10, color: Colors.white54)),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 9, color: Colors.white54)),
               const SizedBox(height: 3),
               Text(it.value,
                   style: const TextStyle(
-                      fontSize: 18,
+                      fontSize: 16,
                       fontWeight: FontWeight.bold,
                     color: Color(0xFF0F9D58))),
               const SizedBox(height: 6),
