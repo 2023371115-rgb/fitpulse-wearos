@@ -283,6 +283,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     ? 'Pulso enviado'
                     : 'Pasos enviados';
           });
+        } else if (res.statusCode == 401 || res.statusCode == 409 || res.statusCode == 404) {
+          await _clearPairedDevice();
+          setState(() {
+            _demoMode = false;
+            _latestMetric = null;
+            _status = 'Reloj desenlazado';
+          });
         } else {
           throw Exception('HTTP ${res.statusCode}');
         }
